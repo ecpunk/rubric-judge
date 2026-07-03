@@ -1,0 +1,9 @@
+# Runtime state — not source. Regenerated on every run.
+logs/
+state/
+config.yaml
+rubric.md
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/

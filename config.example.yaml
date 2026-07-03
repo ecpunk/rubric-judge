@@ -1,0 +1,104 @@
+# rubric-judge — configuration (example)
+#
+# Copy this to config.yaml and edit. The scoring rubric itself lives in
+# rubric.md (a separate prose document, read at runtime), NOT here — this
+# file only carries operational knobs: which boards, thresholds, the
+# deterministic pre-gates, and cost-gate policy.
+
+# Greenhouse board slugs to poll. These are fictional placeholders — replace
+# with real Greenhouse board slugs (the part of
+# https://boards.greenhouse.io/<slug> for the company you're watching).
+boards:
+  - examplecorp
+  - examplecorp-labs
+
+# Path (relative to the repo root) to the prose rubric document the judge
+# scores against. Operator feedback can be appended to this doc's own
+# Feedback Log section, or streamed live via state/feedback_pending.jsonl —
+# either way it takes effect with no code change.
+rubric_doc: "./rubric.md"
+
+thresholds:
+  alert: 7.0            # score >= alert            -> Discord alert
+  near_miss_floor: 5.0   # near_miss_floor <= score < alert -> logged for periodic digest
+  # Deterministic value floor (a hard-kill pre-gate): if the parsed pay-band
+  # TOP is below this, the item is killed before judging. Unknown band is NOT
+  # killed — it is judged and flagged "band not stated". These numbers are
+  # illustrative examples, not a real policy — set them to whatever floor
+  # matters for your own use.
+  comp_floor_base_top: 100000
+  # Some postings state a range that already INCLUDES variable/incentive pay
+  # (an OTE band, not a base band) — detected from the body text
+  # (greenhouse.comp_basis). OTE-basis bands are compared against a separate,
+  # usually higher, floor since they aren't apples-to-apples with a base band.
+  comp_floor_ote_top: 150000
+
+# Coarse eligibility PRE-GATE for location + cost control. This is NOT the
+# subjective scoring rubric — it's a deterministic shortcut so obviously
+# out-of-scope items never reach the LLM. An item is judged only if its
+# location OR one of its Greenhouse `offices` matches one of these tokens
+# (case-insensitive substring match); otherwise it's skipped and no LLM call
+# is spent. Trimmed here to a small illustrative set — widen it to whatever
+# geography actually matters for your use case.
+eligibility:
+  # Deliberately specific: bare "remote" is NOT included, since "Remote -
+  # Netherlands" would then wrongly pass. Only remote-<region> phrasing that
+  # actually names the target region counts as a signal.
+  location_include:
+    - usa
+    - united states
+    - "remote us"
+    - "remote - us"
+    - anywhere
+    - nationwide
+
+# Deterministic FUNCTION pre-gate. Titles are an objective-enough classifier
+# for the unambiguous cases, so those are killed here before any LLM spend;
+# ambiguous titles still go to the judge, whose rubric should carry the same
+# policy. save_titles takes precedence over kill_titles (so a save-listed
+# title survives even if it also contains a kill-listed substring). This is a
+# small illustrative example set, not a real policy.
+function_gate:
+  save_titles:            # always judged, regardless of kill_titles matches
+    - solutions engineer
+    - solutions architect
+    - customer success
+  kill_titles:            # killed deterministically, never judged
+    - software engineer
+    - data engineer
+    - product manager
+    - account executive
+
+# Discord delivery. Reads the webhook URL from the DISCORD_WEBHOOK_URL
+# environment variable — nothing sensitive lives in this file or in code.
+# If DISCORD_WEBHOOK_URL is unset, alerts are logged only (no send attempted).
+discord: {}
+
+# LLM judge. Cheap Haiku-class model behind the vendored cost gate
+# (lib/cost_gate.py). Reads ANTHROPIC_API_KEY from the environment.
+llm:
+  model: "claude-haiku-4-5-20251001"
+  max_tokens: 400
+  # Decoded body text is truncated to this many chars before it hits the
+  # judge, to bound input tokens / cost.
+  content_max_chars: 6000
+  cost_gate:
+    enabled: true
+    enforce: true
+    caller_id: rubric-judge
+    provider: anthropic
+    state_file: state/cost_gate.json
+    global_daily_max_usd: 5.00
+    caller_daily_max_usd: 2.50
+    # First-run seeding judges many items at once; steady-state judges only a
+    # handful of new/changed items per run.
+    caller_run_max_usd: 1.75
+    caller_max_calls_per_run: 800
+    model_pricing_usd_per_mtoken:
+      claude-haiku-4-5-20251001:
+        input: 1.00
+        output: 5.00
+
+# Periodic near-miss digest retention window (days).
+digest:
+  near_miss_window_days: 7

@@ -1,0 +1,64 @@
+{
+  "jobs": [
+    {
+      "id": 1001,
+      "title": "Solutions Engineer, Platform",
+      "company_name": "ExampleCorp",
+      "absolute_url": "https://boards.greenhouse.io/examplecorp/jobs/1001",
+      "location": {"name": "Remote - United States"},
+      "offices": [{"name": "Remote US", "location": "Remote US"}],
+      "first_published": "2026-06-01T00:00:00Z",
+      "updated_at": "2026-06-01T00:00:00Z",
+      "metadata": [{"name": "Team", "value": "Field Engineering"}],
+      "content": "<p>We are hiring a Solutions Engineer. Base Pay Range: $150,000 - $190,000 USD. Fully remote within the United States.</p>"
+    },
+    {
+      "id": 1002,
+      "title": "Software Engineer, Backend",
+      "company_name": "ExampleCorp",
+      "absolute_url": "https://boards.greenhouse.io/examplecorp/jobs/1002",
+      "location": {"name": "Remote - United States"},
+      "offices": [{"name": "Remote US", "location": "Remote US"}],
+      "first_published": "2026-06-01T00:00:00Z",
+      "updated_at": "2026-06-01T00:00:00Z",
+      "metadata": [],
+      "content": "<p>We are hiring a Backend Software Engineer. Base Pay Range: $170,000 - $210,000 USD.</p>"
+    },
+    {
+      "id": 1003,
+      "title": "Solutions Architect, EMEA",
+      "company_name": "ExampleCorp",
+      "absolute_url": "https://boards.greenhouse.io/examplecorp/jobs/1003",
+      "location": {"name": "Remote - Netherlands"},
+      "offices": [{"name": "Amsterdam", "location": "Amsterdam, Netherlands"}],
+      "first_published": "2026-06-01T00:00:00Z",
+      "updated_at": "2026-06-01T00:00:00Z",
+      "metadata": [],
+      "content": "<p>We are hiring a Solutions Architect based in the Netherlands.</p>"
+    },
+    {
+      "id": 1004,
+      "title": "Solutions Consultant, SMB",
+      "company_name": "ExampleCorp",
+      "absolute_url": "https://boards.greenhouse.io/examplecorp/jobs/1004",
+      "location": {"name": "Remote - United States"},
+      "offices": [{"name": "Remote US", "location": "Remote US"}],
+      "first_published": "2026-06-01T00:00:00Z",
+      "updated_at": "2026-06-01T00:00:00Z",
+      "metadata": [],
+      "content": "<p>We are hiring a Solutions Consultant. Base Pay Range: $60,000 - $80,000 USD.</p>"
+    },
+    {
+      "id": 1005,
+      "title": "Customer Success Engineer",
+      "company_name": "ExampleCorp",
+      "absolute_url": "https://boards.greenhouse.io/examplecorp/jobs/1005",
+      "location": {"name": "Remote - United States"},
+      "offices": [{"name": "Remote US", "location": "Remote US"}],
+      "first_published": "2026-06-01T00:00:00Z",
+      "updated_at": "2026-06-01T00:00:00Z",
+      "metadata": [],
+      "content": "<p>We are hiring a Customer Success Engineer. No pay range stated in this posting.</p>"
+    }
+  ]
+}
