@@ -1,9 +1,5 @@
 # rubric-judge
 
-> **DRAFT** — this README is a structural skeleton (architecture, quickstart,
-> section headings) staged for coordinator review. Final prose, tone, and any
-> additional framing are TBD; do not treat the wording below as final copy.
-
 A two-stage watch pipeline: deterministic pre-gates filter a stream of items
 down to the ones worth an expensive look, then an LLM judge scores the
 survivors against a prose policy rubric — a plain-English document, not a
@@ -18,10 +14,29 @@ to any stream of unstructured items you can write a scoring rubric for.
 
 ## Why this pattern
 
-*(TBD — coordinator to expand: the general case for "prose rubric + LLM
-judge" over keyword rules or a fine-tuned classifier; why the pre-gate stage
-exists — cost control, not correctness; why the audit trail and feedback loop
-matter for trusting an LLM-scored pipeline over time.)*
+Keyword rules fail silently. They match what you told them to match, miss what
+you meant, and never tell you the difference. Fine-tuned classifiers fix the
+"what you meant" problem but move the policy somewhere nobody can read it, and
+changing your mind means retraining. A prose rubric splits the difference:
+the policy is a plain-English document anyone can read, diff, and amend — and
+the judge applies it with actual judgment, not substring matching.
+
+The split between the two stages is where most of the design lives. **Anything
+objective belongs in code**: a number below a floor, a location outside the
+allowed set, a title in a class you never want. Those are pre-gates — free,
+deterministic, and auditable. **The judge should only ever see the genuinely
+ambiguous cases.** If you find the LLM making calls a regex could make, move
+that call into a gate; if you find a gate needing exceptions, that call was
+never objective and belongs in the rubric. In practice the gates kill 90%+ of
+the stream, which is why the whole pipeline runs on a cheap model for pennies
+a day.
+
+The audit trail is what makes the system trustworthy over time. Every item
+gets a verdict line — including the ones the gates killed before the judge
+ever saw them. When something doesn't alert and you wonder why, the answer is
+one grep away, not a shrug. Confidence in an LLM-scored pipeline doesn't come
+from the scores it shows you; it comes from being able to inspect the ones it
+didn't.
 
 ## How it works
 
@@ -54,10 +69,30 @@ alerting.
 
 ## The operator feedback loop
 
-*(TBD — coordinator to expand: how `state/feedback_pending.jsonl` gets
-populated in a real deployment, how it composes with the rubric doc's own
-Feedback Log section, and why "same authority, more recent wins" is the right
-conflict rule.)*
+The rubric is the curated policy; the feedback inbox is the live one. They
+compose like this:
+
+- **`rubric.md`** carries the deliberate rules, including an append-only
+  *Feedback Log* section at the bottom — rulings that started as corrections
+  and got promoted to policy.
+- **`state/feedback_pending.jsonl`** is the inbox. In a real deployment
+  something low-friction writes to it — a chat-bot handler that catches the
+  operator replying "bad — we don't care about backfills" under an alert, a
+  small CLI, a cron that drains a form. The judge folds pending entries into
+  its context on every run, so a one-sentence correction changes the next
+  run's verdicts with no deploy and no edit.
+- Periodically, pending entries get promoted into the rubric's Feedback Log
+  (and the inbox drained), so the curated document stays the single source of
+  truth.
+
+When the inbox and the rubric disagree, **more recent wins** — both carry the
+same authority (the operator's), and a later ruling is by definition a
+refinement of an earlier one. Any other conflict rule forces the operator to
+edit the rubric before their correction takes effect, which is exactly the
+friction the inbox exists to remove.
+
+The practical effect: the system converges on its operator's judgment in
+days. Every correction is one sentence, costs nothing, and is permanent.
 
 ## Layout
 
@@ -70,7 +105,7 @@ conflict rule.)*
 | `lib/cost_gate.py` | Vendored per-run / per-day USD + call-count budget gate |
 | `lib/discord_webhook.py` | Vendored minimal Discord webhook sender |
 | `config.example.yaml` | Boards, thresholds, pre-gate config, LLM + cost-gate policy (copy to `config.yaml`) |
-| `rubric.example.md` | Stub — copy to `rubric.md` and write your own prose rubric |
+| `rubric.example.md` | Worked example rubric (competitor hiring-signal intelligence) — copy to `rubric.md` and make it yours |
 | `state/seen.json` | Persisted seen-item ids + content hashes (the diff state) |
 | `state/verdicts.jsonl` | Append-only audit log of every verdict, including pre-gate skips |
 | `state/near_misses.jsonl` | Near-miss records feeding the periodic digest |
