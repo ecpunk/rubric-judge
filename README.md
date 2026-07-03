@@ -1,16 +1,26 @@
 # rubric-judge
 
-A two-stage watch pipeline: deterministic pre-gates filter a stream of items
-down to the ones worth an expensive look, then an LLM judge scores the
-survivors against a prose policy rubric — a plain-English document, not a
-keyword list or a fine-tuned model. Every verdict, including the ones the
-pre-gates killed before they ever reached the judge, lands in an append-only
-audit log. An operator feedback loop lets corrections change future verdicts
-with no code change.
+rubric-judge is a two-stage watch pipeline for streams of unstructured items:
+deterministic pre-gates eliminate everything objectively out of scope, then an
+LLM judge scores the survivors against a prose policy rubric — a plain-English
+document, not a keyword list or a fine-tuned model. Every verdict, including
+the ones the gates killed before the judge ever saw them, lands in an
+append-only audit log, and an operator feedback loop lets a one-sentence
+correction change future verdicts with no deploy.
+
+Think of it as a mailroom clerk working for an editor. The clerk discards
+everything addressed to the wrong department — cheap, mechanical, no judgment
+required. The editor reads what's left against the house style guide and
+decides what deserves attention. And when the editor-in-chief disagrees with
+a call, the correction goes into the style guide, so the same mistake is
+never made twice.
 
 It ships with a Greenhouse job-board adapter as its example data source, but
-the pattern — pre-gate, judge-against-a-rubric, audit, feedback — generalizes
-to any stream of unstructured items you can write a scoring rubric for.
+the pattern — pre-gate, judge against a rubric, audit, feed back — applies to
+any stream you can write a scoring policy for in plain English. It is not a
+sketch: this pipeline was extracted from one that runs in production daily,
+where the feedback loop converged on its operator's judgment within days of
+going live.
 
 ## Why this pattern
 
