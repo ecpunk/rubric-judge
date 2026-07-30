@@ -18,9 +18,11 @@ never made twice.
 It ships with a Greenhouse job-board adapter as its example data source, but
 the pattern — pre-gate, judge against a rubric, audit, feed back — applies to
 any stream you can write a scoring policy for in plain English. It is not a
-sketch: this pipeline was extracted from one that runs in production daily,
-where the feedback loop converged on its operator's judgment within days of
-going live.
+sketch: this is an extraction of a pipeline that has been polling and judging
+on a daily timer since it went live, with a growing append-only verdict log
+behind it. Most of the operator's corrections landed in the first couple of
+days after go-live; the rate has stayed low since, with only occasional new
+rulings as edge cases turn up.
 
 ## Why this pattern
 
