@@ -10,7 +10,7 @@ Stage 2 (LLM judge): score each surviving item 0-10 against the prose rubric
   document (read at runtime — the rubric is never hardcoded). Cheap
   Haiku-class model behind a vendored LLM cost gate.
 
-Delivery: score >= alert -> Discord; near-miss band -> logged for a periodic
+Delivery: score >= alert -> configured notifier; near-miss band -> logged for a periodic
 digest; everything -> append-only verdicts JSONL audit log.
 
 First run seeds state without per-item flooding: it judges the currently-open
@@ -24,7 +24,7 @@ scored against a rubric you can write down in English.
 
 Usage:
   watcher.py                        # normal run
-  watcher.py --dry-run              # judge + print, no Discord, no state/audit writes
+  watcher.py --dry-run              # judge + print, no sends, no state/audit writes
   watcher.py --board examplecorp    # limit to one board
   watcher.py --only-ids 123,456     # judge only these item ids
   watcher.py --limit 20             # cap items judged per board (testing)
@@ -49,7 +49,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import greenhouse  # noqa: E402
 import judge as judge_mod  # noqa: E402
-import notify as discord_mod  # noqa: E402
+import notify as notify_mod  # noqa: E402
 from lib.cost_gate import CostPolicyGate  # noqa: E402
 
 LOG_DIR = REPO_ROOT / "logs"
@@ -204,6 +204,16 @@ def location_eligible(location: str, tokens: list[str]) -> bool:
     return any(tok.lower() in loc for tok in tokens)
 
 
+def home_region_cfg(config: dict) -> tuple[str, str]:
+    """(name, abbr) for the optional stricter home-region gate, or ("", "")
+    when off (config.example.yaml's default). See
+    greenhouse.home_region_pre_gate for what the gate does with these."""
+    cfg = config.get("eligibility", {}).get("home_region", {}) or {}
+    if not cfg.get("enabled"):
+        return "", ""
+    return str(cfg.get("name") or "").strip(), str(cfg.get("abbr") or "").strip()
+
+
 # --------------------------------------------------------------------------- #
 # Formatting
 # --------------------------------------------------------------------------- #
@@ -261,6 +271,7 @@ def process_board(
     llm_cfg = config.get("llm", {})
     content_max = int(llm_cfg.get("content_max_chars", 6000))
     loc_tokens = config.get("eligibility", {}).get("location_include", [])
+    home_name, home_abbr = home_region_cfg(config)
     alert_th = float(config["thresholds"]["alert"])
     near_floor = float(config["thresholds"]["near_miss_floor"])
     comp_floor = float(config["thresholds"].get("comp_floor_base_top", 100000))
@@ -280,7 +291,8 @@ def process_board(
     near_misses: list[dict] = []
     stats = {"total": len(jobs), "candidates": 0, "eligible": 0, "judged": 0,
              "alerts": 0, "near": 0, "skipped_eligibility": 0,
-             "skipped_comp": 0, "skipped_function": 0, "errors": 0}
+             "skipped_home_region": 0, "skipped_comp": 0,
+             "skipped_function": 0, "errors": 0}
 
     judged_count = 0
     for job in jobs:
@@ -298,7 +310,7 @@ def process_board(
 
         location = greenhouse.location_name(job)
         blob = greenhouse.eligibility_blob(job)
-        loc_token = greenhouse.location_token(job)
+        loc_token = greenhouse.location_token(job, home_name, home_abbr)
         pay_lo, pay_hi = greenhouse.extract_pay_range(job, decoded)
         pay_basis = greenhouse.comp_basis(decoded)
         pay_band = greenhouse.fmt_band_compact(pay_lo, pay_hi)
@@ -326,6 +338,19 @@ def process_board(
         if not location_eligible(blob, loc_tokens):
             stats["skipped_eligibility"] += 1
             _skip("no_location_signal", "location pre-gate: no configured location match")
+            board_seen[jid] = h
+            continue
+
+        # Pre-gate 1.5 (deterministic, geography, OFF by default): a stricter
+        # single-region hard-kill on top of the coarse check above — see
+        # eligibility.home_region in config.example.yaml. Only fires when a
+        # home region is configured; otherwise home_region_pre_gate always
+        # returns None and this never skips anything.
+        if greenhouse.home_region_pre_gate(blob, home_name, home_abbr) == "outside_home_region":
+            stats["skipped_home_region"] += 1
+            _skip("outside_home_region",
+                  "home-region pre-gate: enumerates a different specific US region, "
+                  "no home region / no nationwide (outside_home_region)")
             board_seen[jid] = h
             continue
 
@@ -443,9 +468,7 @@ def run(args: argparse.Namespace) -> int:
                  len(feedback.splitlines()))
 
     boards = [args.board] if args.board else config.get("boards", [])
-    webhook = discord_mod.resolve_webhook()
-    if webhook is None:
-        log.warning("no Discord webhook resolved (DISCORD_WEBHOOK_URL unset); alerts will be logged only")
+    notifier = notify_mod.resolve_notifier(REPO_ROOT, config.get("notifier") or {})
 
     all_alerts: list[dict] = []
     all_near: list[dict] = []
@@ -461,9 +484,9 @@ def run(args: argparse.Namespace) -> int:
 
     # Delivery.
     if first_run:
-        _deliver_first_run(all_alerts, boards, seen, webhook, args)
+        _deliver_first_run(all_alerts, boards, seen, notifier, args)
     else:
-        _deliver_alerts(all_alerts, webhook, args)
+        _deliver_alerts(all_alerts, notifier, args)
 
     if all_near and not first_run:
         log.info("%d near-miss(es) logged for periodic digest", len(all_near))
@@ -482,17 +505,21 @@ def run(args: argparse.Namespace) -> int:
     return 0
 
 
-def _deliver_alerts(alerts: list[dict], webhook: str | None, args: argparse.Namespace) -> None:
-    for v in alerts:
-        msg = fmt_alert(v)
-        if args.dry_run or webhook is None:
-            log.info("[ALERT %s]\n%s", "dry-run" if args.dry_run else "no-webhook", msg)
-        else:
-            discord_mod.send(msg, webhook)
+def _deliver_alerts(alerts: list[dict], notifier: "notify_mod.Notifier",
+                    args: argparse.Namespace) -> None:
+    if not alerts:
+        return
+    if args.dry_run:
+        for v in alerts:
+            log.info("[ALERT dry-run]\n%s", fmt_alert(v))
+        return
+    hits = sorted(alerts, key=lambda v: v.get("score") or 0, reverse=True)
+    header = f"\U0001F3AF **rubric-judge — {len(hits)} new alert(s) at score >= alert threshold**"
+    notifier.send_chunked(header, [fmt_alert(v) for v in hits])
 
 
 def _deliver_first_run(alerts: list[dict], boards: list[str], seen: dict,
-                       webhook: str | None, args: argparse.Namespace) -> None:
+                       notifier: "notify_mod.Notifier", args: argparse.Namespace) -> None:
     n_indexed = sum(len(b) for b in seen.get("boards", {}).values())
     hits = sorted(alerts, key=lambda v: v["score"], reverse=True)
     header = (
@@ -506,18 +533,17 @@ def _deliver_first_run(alerts: list[dict], boards: list[str], seen: dict,
     else:
         items = [fmt_digest_item(v) for v in hits]
 
-    if args.dry_run or webhook is None:
-        log.info("[FIRST-RUN DIGEST %s]\n%s\n\n%s",
-                 "dry-run" if args.dry_run else "no-webhook", header, "\n\n".join(items))
+    if args.dry_run:
+        log.info("[FIRST-RUN DIGEST dry-run]\n%s\n\n%s", header, "\n\n".join(items))
     else:
-        discord_mod.send_chunked(header, items, webhook)
+        notifier.send_chunked(header, items)
 
 
 def weekly_digest(args: argparse.Namespace) -> int:
     config = load_config()
     window_days = int(config.get("digest", {}).get("near_miss_window_days", 7))
     cutoff = dt.datetime.utcnow() - dt.timedelta(days=window_days)
-    webhook = discord_mod.resolve_webhook()
+    notifier = notify_mod.resolve_notifier(REPO_ROOT, config.get("notifier") or {})
 
     recent: dict[str, dict] = {}
     if NEAR_MISS_FILE.exists():
@@ -545,18 +571,17 @@ def weekly_digest(args: argparse.Namespace) -> int:
     if not items:
         log.info("digest: no near-misses in window; nothing to send")
         return 0
-    if args.dry_run or webhook is None:
-        log.info("[DIGEST %s]\n%s\n\n%s",
-                 "dry-run" if args.dry_run else "no-webhook", header, "\n\n".join(items))
+    if args.dry_run:
+        log.info("[DIGEST dry-run]\n%s\n\n%s", header, "\n\n".join(items))
     else:
-        discord_mod.send_chunked(header, items, webhook)
+        notifier.send_chunked(header, items)
     return 0
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description="rubric-judge — Greenhouse job-board watch pipeline")
     p.add_argument("--dry-run", action="store_true",
-                   help="judge + print, no Discord sends, no state/audit writes")
+                   help="judge + print, no sends, no state/audit writes")
     p.add_argument("--board", help="limit to a single board slug")
     p.add_argument("--only-ids", help="comma-separated item ids to judge (ignores diff)")
     p.add_argument("--limit", type=int, default=0, help="cap items judged per board")

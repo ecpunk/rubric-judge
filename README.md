@@ -57,11 +57,11 @@ Two stages, deliberately split so the expensive stage runs rarely:
 1. **Poll + diff (deterministic, free).** Fetch each watched board via the
    Greenhouse public API, hash each item's content, and compare against
    persisted state (`state/seen.json`). Only **new** or **materially-changed**
-   items proceed. A handful of deterministic pre-gates — location, a
-   compensation floor, a function/title filter — then drop obviously
-   out-of-scope items before any LLM budget is spent. These pre-gates are a
-   cost-control shortcut for the unambiguous cases, not the scoring policy
-   itself.
+   items proceed. A handful of deterministic pre-gates — a coarse location
+   check, an optional stricter single-region hard-kill, a compensation floor,
+   a function/title filter — then drop obviously out-of-scope items before any
+   LLM budget is spent. These pre-gates are a cost-control shortcut for the
+   unambiguous cases, not the scoring policy itself.
 
 2. **Judge (LLM, cheap model).** Each surviving item is scored 0–10 by a
    Haiku-class model reading the rubric document (`rubric.md`) at runtime.
@@ -69,10 +69,11 @@ Two stages, deliberately split so the expensive stage runs rarely:
    operator correction to its Feedback Log, changes future verdicts with no
    deploy. The judge returns a score, any hard-kill reason, and a short "why".
 
-**Delivery.** Score ≥ `thresholds.alert` → a Discord alert (title, band,
-location, score, one-line why, URL). Scores in the near-miss band → logged
-for a periodic digest. **Every** verdict, including pre-gate skips → an
-append-only JSONL audit log (`state/verdicts.jsonl`).
+**Delivery.** Score ≥ `thresholds.alert` → an alert fires through whichever
+backend `notifier.type` names (title, band, location, score, one-line why,
+URL). Scores in the near-miss band → logged for a periodic digest. **Every**
+verdict, including pre-gate skips → an append-only JSONL audit log
+(`state/verdicts.jsonl`).
 
 **First run** seeds state from the currently open items without per-item
 flooding: it judges everything once and sends a single digest of what's
@@ -87,11 +88,13 @@ compose like this:
 - **`rubric.md`** carries the deliberate rules, including an append-only
   *Feedback Log* section at the bottom — rulings that started as corrections
   and got promoted to policy.
-- **`state/feedback_pending.jsonl`** is the inbox. In a real deployment
-  something low-friction writes to it — a chat-bot handler that catches the
-  operator replying "bad — we don't care about backfills" under an alert, a
-  small CLI, a cron that drains a form. The judge folds pending entries into
-  its context on every run, so a one-sentence correction changes the next
+- **`state/feedback_pending.jsonl`** is the inbox. `feedback.py` owns the
+  contract (vocabulary, item-matching, record shape) but not the trigger —
+  wire whatever low-friction surface you already have in front of it: a
+  chat-bot handler that catches the operator replying "bad — we don't care
+  about backfills" under an alert, a small CLI, a cron that drains a form. The
+  judge folds pending entries into its context on every run, so a one-sentence
+  correction changes the next
   run's verdicts with no deploy and no edit.
 - Periodically, pending entries get promoted into the rubric's Feedback Log
   (and the inbox drained), so the curated document stays the single source of
@@ -111,12 +114,12 @@ days. Every correction is one sentence, costs nothing, and is permanent.
 | Path | Role |
 |------|------|
 | `watcher.py` | Orchestrator + CLI (`--dry-run`, `--board`, `--only-ids`, `--limit`, `--weekly-digest`) |
-| `greenhouse.py` | Example data-source adapter — Greenhouse board client, HTML decode, pay-band extraction |
+| `greenhouse.py` | Example data-source adapter — Greenhouse board client, HTML decode, pay-band extraction, the geography pre-gates |
 | `judge.py` | LLM judge — supplies the mechanism only; the rubric is read from `rubric.md` at runtime |
-| `notify.py` | Discord delivery |
+| `feedback.py` | Operator-feedback contract: parses a reply into a verdict + matches it to an item (wire your own chat/CLI/cron in front of it) |
+| `notify.py` | Delivery — pluggable `stdout` / `file` / `webhook` backends, no bot or token required |
 | `lib/cost_gate.py` | Vendored per-run / per-day USD + call-count budget gate |
-| `lib/discord_webhook.py` | Vendored minimal Discord webhook sender |
-| `config.example.yaml` | Boards, thresholds, pre-gate config, LLM + cost-gate policy (copy to `config.yaml`) |
+| `config.example.yaml` | Boards, thresholds, pre-gate config, delivery, LLM + cost-gate policy (copy to `config.yaml`) |
 | `rubric.example.md` | Worked example rubric (competitor hiring-signal intelligence) — copy to `rubric.md` and make it yours |
 | `state/seen.json` | Persisted seen-item ids + content hashes (the diff state) |
 | `state/verdicts.jsonl` | Append-only audit log of every verdict, including pre-gate skips |
@@ -135,26 +138,56 @@ pip install -r requirements-dev.txt
 cp config.example.yaml config.yaml   # edit boards / thresholds / pre-gates
 cp rubric.example.md rubric.md       # write your prose rubric here
 
-export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."  # optional
-export ANTHROPIC_API_KEY="sk-ant-..."                              # required for real judging
+export ANTHROPIC_API_KEY="sk-ant-..."  # required for real judging
 
 # Dry run against a real board, no sends, no state writes:
-python watcher.py --dry-run --board <your-board-slug>
+python watcher.py --dry-run --board <your-board-slug> --limit 5
 
 # Run the pipeline tests (fixture board + stubbed judge, no API key needed):
 pytest
 ```
 
+`--dry-run` still fetches the real board and runs the pre-gates + judge, it
+just skips sending and skips writing state/audit records — the safe way to see
+real verdicts before arming steady-state alerting. Without `ANTHROPIC_API_KEY`
+set, the poll + diff + pre-gate stages still run for real against the live
+board; the judge stage returns an "ANTHROPIC_API_KEY not set" verdict for each
+eligible item instead of calling the model, so you can see exactly how many
+items reached the judge and why the rest didn't, with zero cost.
+
 ## Configuration & secrets
 
-Nothing sensitive lives in the code or in `config.yaml`. The Anthropic API key
-comes from `ANTHROPIC_API_KEY`; Discord delivery comes from
-`DISCORD_WEBHOOK_URL`. Boards, thresholds, pre-gate lists, and cost-gate
-policy are all in `config.yaml`; the scoring rubric is a separate prose file
-(`rubric.md`).
+Nothing sensitive lives in the code or in `config.yaml`. `ANTHROPIC_API_KEY`
+(required for real judging) comes from the environment. Boards, thresholds,
+pre-gate lists, delivery, and cost-gate policy are all in `config.yaml`; the
+scoring rubric is a separate prose file (`rubric.md`).
+
+**Delivery (`notifier:`)** is pluggable and needs no bot or token:
+
+- `stdout` (default) — log-only, zero setup, always available.
+- `file` — append each digest to a local file (`path`).
+- `webhook` — POST a generic `{"text": "..."}` JSON body to `webhook_url`.
+  This is the same body shape a Slack "Incoming Webhook" integration accepts,
+  so pointing it at one delivers to Slack with no code change and no bot
+  token. Most other chat platforms' generic incoming-webhook endpoints accept
+  the same shape too.
+
+**Geography** has two independent gates:
+
+- `eligibility.location_include` — a coarse "must carry some location/remote
+  signal" list. Always on.
+- `eligibility.home_region` — an optional, stricter second gate: kill any item
+  whose location enumerates a *different* specific US region with no
+  nationwide-remote catch-all. **Off by default.** Turn it on only if your use
+  case has one specific region a match must be workable from.
 
 ## Cost control
 
 The LLM judge runs behind `lib/cost_gate.py`: a per-run USD cap, a per-day USD
 cap (global and per-caller), and a per-run call-count cap, backed by a
 file-locked JSON ledger so it holds even across concurrent runs on one host.
+On the default Haiku-class model (~$1/$5 per million input/output tokens), a
+steady-state run — most items killed by the free deterministic pre-gates
+before ever reaching the judge — typically costs a few cents a day; a
+first run that seeds state by judging every currently-open item costs more
+(one judge call per eligible item), bounded by `caller_run_max_usd`.

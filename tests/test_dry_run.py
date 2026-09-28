@@ -154,7 +154,6 @@ def test_run_end_to_end_via_monkeypatched_modules(config, tmp_path, monkeypatch,
     monkeypatch.setattr(greenhouse, "fetch_board", fake_fetch_board)
     monkeypatch.setattr(judge_mod, "judge_item", fake_judge_item)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
 
     watcher.setup_logging()
     rc = watcher.run(Args(dry_run=True))

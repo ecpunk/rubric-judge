@@ -19,7 +19,7 @@ boards:
 rubric_doc: "./rubric.md"
 
 thresholds:
-  alert: 7.0            # score >= alert            -> Discord alert
+  alert: 7.0            # score >= alert            -> an alert fires (see `notifier` below)
   near_miss_floor: 5.0   # near_miss_floor <= score < alert -> logged for periodic digest
   # Deterministic value floor (a hard-kill pre-gate): if the parsed pay-band
   # TOP is below this, the item is killed before judging. Unknown band is NOT
@@ -51,6 +51,17 @@ eligibility:
     - "remote - us"
     - anywhere
     - nationwide
+  # Optional SECOND, stricter geography gate: kill any item whose location
+  # enumerates a specific region OTHER than your own, with no nationwide/
+  # remote catch-all (e.g. a "Remote - East Coast" item when you're on the
+  # West Coast). location_include above never catches this on its own, since
+  # it only checks for the presence of a US/remote signal, not which region.
+  # OFF by default — most users don't need a second gate. Turn it on only if
+  # your search has one specific region a role must be workable from.
+  home_region:
+    enabled: false
+    name: ""   # e.g. "Texas" — matched case-insensitively, whole word
+    abbr: ""   # e.g. "TX" — matched case-sensitively, whole word
 
 # Deterministic FUNCTION pre-gate. Titles are an objective-enough classifier
 # for the unambiguous cases, so those are killed here before any LLM spend;
@@ -69,10 +80,18 @@ function_gate:
     - product manager
     - account executive
 
-# Discord delivery. Reads the webhook URL from the DISCORD_WEBHOOK_URL
-# environment variable — nothing sensitive lives in this file or in code.
-# If DISCORD_WEBHOOK_URL is unset, alerts are logged only (no send attempted).
-discord: {}
+# Delivery. `type` selects the backend; only `stdout` needs no further config,
+# and nothing here requires a secret beyond an optional webhook URL you supply.
+#   stdout  (default) — log-only, always available, zero setup.
+#   file    — append each digest to a local file (`path`, relative to the repo
+#             root unless absolute).
+#   webhook — POST a generic {"text": "..."} JSON body to `webhook_url`. This
+#             is the same body shape a Slack "Incoming Webhook" integration
+#             accepts, so pointing it at one works with no other change.
+notifier:
+  type: stdout
+  # path: "state/notifications.log"                        # type: file
+  # webhook_url: "https://hooks.example.com/incoming/..."   # type: webhook
 
 # LLM judge. Cheap Haiku-class model behind the vendored cost gate
 # (lib/cost_gate.py). Reads ANTHROPIC_API_KEY from the environment.

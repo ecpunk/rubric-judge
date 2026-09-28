@@ -17,6 +17,7 @@ import html
 import json
 import re
 import urllib.request
+from functools import lru_cache
 from typing import Any
 
 BOARD_URL = "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"
@@ -64,6 +65,105 @@ _NATIONWIDE_RE = re.compile(
     r")",
     re.I,
 )
+
+
+# --------------------------------------------------------------------------- #
+# Geography — an optional SECOND, stricter location gate on top of watcher.py's
+# coarse location_include list: "must be workable from one specific US region,
+# not just anywhere in the US". Off by default (see config.example.yaml's
+# eligibility.home_region) — most users don't need it. When a home region is
+# configured, this kills a US-specific-but-wrong-region item (e.g. a "Remote -
+# East Coast" req when your home region is on the West Coast) that
+# location_include alone would pass, since it never enumerates specific
+# regions.
+# --------------------------------------------------------------------------- #
+_ALL_US_REGION_NAMES = {
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+    "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
+    "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine",
+    "maryland", "massachusetts", "michigan", "minnesota", "mississippi",
+    "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey",
+    "new mexico", "new york", "north carolina", "north dakota", "ohio",
+    "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina",
+    "south dakota", "tennessee", "texas", "utah", "vermont", "virginia",
+    "washington", "west virginia", "wisconsin", "wyoming",
+    "district of columbia",
+}
+_ALL_US_REGION_ABBR = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID",
+    "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS",
+    "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK",
+    "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV",
+    "WI", "WY", "DC",
+}
+
+
+@lru_cache(maxsize=16)
+def _home_region_regexes(home_name: str, home_abbr: str):
+    """(name_re, abbr_re) matching the configured home region — name matched
+    case-insensitively, abbreviation matched case-SENSITIVELY (uppercase,
+    word-bounded) so a lowercase substring like "or"/"in" inside an ordinary
+    word never false-matches. Either half may be "" if you only have one."""
+    name_re = re.compile(r"\b" + re.escape(home_name) + r"\b", re.I) if home_name else None
+    abbr_re = re.compile(r"\b" + re.escape(home_abbr) + r"\b") if home_abbr else None
+    return name_re, abbr_re
+
+
+@lru_cache(maxsize=16)
+def _other_region_regexes(home_name: str, home_abbr: str):
+    """(name_re, abbr_re) matching every US state/DC EXCEPT the configured
+    home region."""
+    names = _ALL_US_REGION_NAMES - ({home_name.lower()} if home_name else set())
+    abbrs = _ALL_US_REGION_ABBR - ({home_abbr.upper()} if home_abbr else set())
+    name_re = (re.compile(r"\b(" + "|".join(re.escape(n) for n in
+                                              sorted(names, key=len, reverse=True)) + r")\b", re.I)
+               if names else None)
+    abbr_re = re.compile(r"\b(" + "|".join(sorted(abbrs)) + r")\b") if abbrs else None
+    return name_re, abbr_re
+
+
+# A US-country marker anywhere in the blob ("United States", "United States of
+# America", "USA", "U.S."). On its own this just means "some US location" —
+# every US role carries it. But a blob that has this marker, yet no home
+# region, no nationwide-remote catch-all, and no OTHER state token either, is a
+# specific-US-CITY role (e.g. "Cincinnati, United States of America", which
+# omits the state entirely). With the home_region gate on, that is still a
+# specific non-home US location with no remote option, so it is killed the
+# same way an enumerated-state item is.
+_US_COUNTRY_RE = re.compile(
+    r"\b(united\s+states(?:\s+of\s+america)?|u\.?\s?s\.?\s?a\.?|u\.?\s?s\.?)\b",
+    re.I,
+)
+
+
+def home_region_pre_gate(blob: str, home_name: str = "", home_abbr: str = "") -> str | None:
+    """Deterministic home-region eligibility gate. Given the concatenated
+    location/offices geography blob, with a home region configured:
+      - explicit home region anywhere            -> eligible (None)
+      - a nationwide-remote catch-all            -> eligible (None)
+      - specific non-home US states/cities only  -> KILL, returns "outside_home_region"
+      - no US state/city enumeration at all       -> None (let the judge decide)
+
+    With NO home region configured (home_name and home_abbr both ""), this
+    always returns None — the gate is off, exactly config.example.yaml's
+    default. Only meaningful geography check left is then watcher.py's
+    location_include list.
+    """
+    if not blob:
+        return None  # unknown geography -> let the judge decide
+    if not home_name and not home_abbr:
+        return None  # gate disabled/unconfigured
+    home_name_re, home_abbr_re = _home_region_regexes(home_name, home_abbr)
+    if (home_name_re and home_name_re.search(blob)) or (home_abbr_re and home_abbr_re.search(blob)):
+        return None
+    if _NATIONWIDE_RE.search(blob):
+        return None
+    other_name_re, other_abbr_re = _other_region_regexes(home_name, home_abbr)
+    if (other_name_re and other_name_re.search(blob)) or (other_abbr_re and other_abbr_re.search(blob)):
+        return "outside_home_region"
+    if _US_COUNTRY_RE.search(blob):
+        return "outside_home_region"
+    return None
 
 
 def _to_int(digits: str) -> int | None:
@@ -188,13 +288,18 @@ def extract_pay_band(job: dict[str, Any], decoded_text: str) -> str | None:
     return fmt_band_compact(lo, hi)
 
 
-def location_token(job: dict[str, Any]) -> str:
+def location_token(job: dict[str, Any], home_name: str = "", home_abbr: str = "") -> str:
     """One-token location for alerts/digests.
 
-    "Remote-USA" for a nationwide catch-all, else the leading city/label from
-    the location name (onsite/hybrid roles).
+    "<abbr-or-name>-remote" when home-region-eligible (only meaningful with
+    home_region_pre_gate configured), "Remote-USA" for a nationwide catch-all,
+    else the leading city/label from the location name (onsite/hybrid roles).
     """
     blob = eligibility_blob(job)
+    if home_name or home_abbr:
+        home_name_re, home_abbr_re = _home_region_regexes(home_name, home_abbr)
+        if (home_name_re and home_name_re.search(blob)) or (home_abbr_re and home_abbr_re.search(blob)):
+            return f"{home_abbr or home_name}-remote"
     if _NATIONWIDE_RE.search(blob):
         return "Remote-USA"
     name = location_name(job).strip()
